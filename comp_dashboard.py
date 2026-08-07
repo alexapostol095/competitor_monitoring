@@ -118,6 +118,8 @@ def view_overview(snap, cm, value_key, value_label, dp):
             return
 
     work = d.copy()
+    _overview_drill(work)
+
     if metric.startswith("Cheapest"):
         d = d.groupby([gran, "CountryCode"])[value_col].min().reset_index()
         mat = d.pivot(index=gran, columns="CountryCode", values=value_col)
@@ -141,14 +143,11 @@ def view_overview(snap, cm, value_key, value_label, dp):
                    "countries. Amber = below RRP. Blank = no RRP for that cell.")
         st.dataframe(style_index(mat, dp), use_container_width=True, height=520)
 
-    _overview_drill(work)
-
 
 def _overview_drill(work):
     """Jump a chosen product (optionally focused on one country) into the Article view.
     Streamlit has no native click-into-cell, so this is an explicit product+country picker
     that lands the user on the same detail Victor wanted from clicking a price cell."""
-    st.divider()
     st.caption("Inspect a product — opens it in the Article view, optionally focused on one country")
     prods = sorted(work["ProductName"].unique())
     cc = st.columns([3, 1, 1])
@@ -161,6 +160,7 @@ def _overview_drill(work):
         st.session_state["drill_country"] = None if focus == "All countries" else focus
         st.session_state["_go_article"] = True
         st.rerun()
+    st.divider()
 
 
 def view_article(snap, cm, value_key, value_label, dp, undercut):
