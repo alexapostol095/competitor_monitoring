@@ -55,14 +55,6 @@ def cols_for_mode(df: pd.DataFrame, eur: bool) -> dict:
                 ship="ShippingCost", rrp="RRP", unit=None, eur=False)
 
 
-def competitor_group(name: str) -> str:
-    s = str(name).lower().strip()
-    s = re.split(r"\s*[-|/]\s*", s)[0]
-    s = re.sub(r"\.(fr|de|nl|es|it|ch|pl|co\.uk|uk|com|eu|be|se|net)$", "", s.strip())
-    s = re.sub(r"\s+(france|deutschland|espa(?:ñ|n)a|nederland|italia|schweiz)$", "", s)
-    return s.strip() or str(name)
-
-
 def one_currency(df: pd.DataFrame):
     cur = df["Currency"].dropna().unique()
     return cur[0] if len(cur) == 1 else None
@@ -125,6 +117,7 @@ def view_overview(snap, cm, value_key, value_label, dp):
                     "(a single-country sidebar selection will always empty this).")
             return
 
+    work = d.copy()
     if metric.startswith("Cheapest"):
         d = d.groupby([gran, "CountryCode"])[value_col].min().reset_index()
         mat = d.pivot(index=gran, columns="CountryCode", values=value_col)
@@ -148,17 +141,50 @@ def view_overview(snap, cm, value_key, value_label, dp):
                    "countries. Amber = below RRP. Blank = no RRP for that cell.")
         st.dataframe(style_index(mat, dp), use_container_width=True, height=520)
 
+    _overview_drill(work)
+
+
+def _overview_drill(work):
+    """Jump a chosen product (optionally focused on one country) into the Article view.
+    Streamlit has no native click-into-cell, so this is an explicit product+country picker
+    that lands the user on the same detail Victor wanted from clicking a price cell."""
+    st.divider()
+    st.caption("Inspect a product — opens it in the Article view, optionally focused on one country")
+    prods = sorted(work["ProductName"].unique())
+    cc = st.columns([3, 1, 1])
+    prod = cc[0].selectbox("Product", prods, key="drill_prod_pick")
+    ctry_opts = ["All countries"] + sorted(work.loc[work.ProductName.eq(prod), "CountryCode"].unique())
+    focus = cc[1].selectbox("Country", ctry_opts, key="drill_ctry_pick")
+    cc[2].markdown("<div style='height:1.8em'></div>", unsafe_allow_html=True)
+    if cc[2].button("Open →", use_container_width=True):
+        st.session_state["drill_product"] = prod
+        st.session_state["drill_country"] = None if focus == "All countries" else focus
+        st.session_state["_go_article"] = True
+        st.rerun()
+
 
 def view_article(snap, cm, value_key, value_label, dp, undercut):
     st.subheader("Article view — one product, cheapest first")
     value_col = cm[value_key]
     unit = unit_label(cm, snap)
     prods = snap[["SymsonProductId", "ProductName"]].drop_duplicates().sort_values("ProductName")
-    label = st.selectbox("Product", prods["ProductName"])
+    names = list(prods["ProductName"])
+
+    # a drill-through from the overview pre-selects the product (and maybe a country)
+    drill_prod = st.session_state.pop("drill_product", None)
+    drill_ctry = st.session_state.pop("drill_country", None)
+    idx = names.index(drill_prod) if drill_prod in names else 0
+    label = st.selectbox("Product", names, index=idx)
     pid = prods.loc[prods.ProductName.eq(label), "SymsonProductId"].iloc[0]
 
     d = snap[snap.SymsonProductId.eq(pid)].copy()
     d["Index"] = price_index(d)
+
+    country_opts = ["All countries"] + sorted(d["CountryCode"].unique())
+    c_idx = country_opts.index(drill_ctry) if drill_ctry in country_opts else 0
+    focus = st.selectbox("Country focus", country_opts, index=c_idx)
+    if focus != "All countries":
+        d = d[d.CountryCode.eq(focus)]
 
     cheapest = (d.loc[d.groupby("CountryCode")[value_col].idxmin()]
                  .sort_values(value_col)[["CountryCode", "ShopName", value_col,
@@ -169,7 +195,8 @@ def view_article(snap, cm, value_key, value_label, dp, undercut):
                                 cm["rrp"]: st.column_config.NumberColumn(format=f"%.{dp}f"),
                                 "Index": st.column_config.NumberColumn(format=f"%.{dp}f")})
 
-    st.caption("All offers, cheapest first")
+    cap = "All offers, cheapest first" + (f" — {focus} only" if focus != "All countries" else "")
+    st.caption(cap)
     cols = [c for c in ["CountryCode", "ShopName", cm["price"], cm["ship"], cm["total"],
                         cm["rrp"], "Currency", "Index"] if c in d.columns]
     full = d.sort_values(value_col)[cols]
@@ -178,14 +205,11 @@ def view_article(snap, cm, value_key, value_label, dp, undercut):
     st.dataframe(full, use_container_width=True, hide_index=True)
 
 
-def view_competitor(snap, cm, value_key, value_label, dp, group_comp):
+def view_competitor(snap, cm, value_key, value_label, dp):
     st.subheader("Competitor view — one competitor across products & countries")
-    key = "CompetitorGroup" if group_comp else "ShopName"
-    if group_comp and "CompetitorGroup" not in snap:
-        snap = snap.assign(CompetitorGroup=snap.ShopName.map(competitor_group))
-    who = st.selectbox("Competitor", sorted(snap[key].unique()))
+    who = st.selectbox("Competitor", sorted(snap["ShopName"].unique()))
 
-    d = snap[snap[key].eq(who)].copy()
+    d = snap[snap["ShopName"].eq(who)].copy()
     d["Index"] = price_index(d)
     c = st.columns(3)
     c[0].metric("Products listed", d.SymsonProductId.nunique())
@@ -297,10 +321,16 @@ def view_history(fdf, cm, value_key, value_label):
     else:
         cur = one_currency(d)
         note = f" ({cur})" if cur else " — mixed currencies; switch to EUR or filter to one country"
-    series = (d.groupby(["day", "CountryCode"])[value_col].min().reset_index()
-               .pivot(index="day", columns="CountryCode", values=value_col))
+
+    # cheapest per country per day, and WHICH shop set it (Victor: "who is lowering prices?")
+    cheapest = d.loc[d.groupby(["day", "CountryCode"])[value_col].idxmin()]
+    series = cheapest.pivot(index="day", columns="CountryCode", values=value_col)
     st.caption(f"Cheapest {value_label} per country, by day{note}")
     st.line_chart(series)
+
+    st.caption("Who set each day's cheapest price (the shop behind each point above)")
+    who = cheapest.pivot(index="day", columns="CountryCode", values="ShopName")
+    st.dataframe(who, use_container_width=True)
 
 
 def view_quality(fdf, snap):
@@ -363,7 +393,6 @@ def main():
     basis = s.radio("Ranking basis", ["Landed (incl. shipping)", "Sticker price"], index=0)
     value_key = "total" if basis.startswith("Landed") else "price"
     value_label = "landed" if basis.startswith("Landed") else "sticker"
-    group_comp = s.checkbox("Group competitors across country sites (heuristic)", value=False)
 
     s.markdown("### Flags")
     use_uc = s.checkbox("Flag index below…", value=False)
@@ -375,17 +404,29 @@ def main():
         return
 
     snap = latest_snapshot(fdf)
-    if group_comp:
-        snap = snap.assign(CompetitorGroup=snap.ShopName.map(competitor_group))
 
-    view = s.radio("View", ["Europe overview", "Article", "Competitor",
-                            "Benchmarking", "RRP violators", "Price history", "Data quality"])
+    s.markdown("### Views")
+    mode = s.radio("Mode", ["Basic", "Advanced"], index=0, horizontal=True,
+                   help="Basic shows the three core views for day-to-day use. "
+                        "Advanced adds benchmarking, RRP violators, history and data quality.")
+    basic_views = ["Europe overview", "Article", "Competitor"]
+    extra_views = ["Benchmarking", "RRP violators", "Price history", "Data quality"]
+    views = basic_views if mode == "Basic" else basic_views + extra_views
+
+    # a drill request from the overview forces the radio to Article before it renders
+    if st.session_state.pop("_go_article", False):
+        st.session_state["view_radio"] = "Article"
+    if st.session_state.get("view_radio") not in views:
+        st.session_state["view_radio"] = views[0]
+
+    view = s.radio("View", views, key="view_radio")
+
     if view == "Europe overview":
         view_overview(snap, cm, value_key, value_label, dp)
     elif view == "Article":
         view_article(snap, cm, value_key, value_label, dp, undercut)
     elif view == "Competitor":
-        view_competitor(snap, cm, value_key, value_label, dp, group_comp)
+        view_competitor(snap, cm, value_key, value_label, dp)
     elif view == "Benchmarking":
         view_benchmark(snap, dp, undercut)
     elif view == "RRP violators":
