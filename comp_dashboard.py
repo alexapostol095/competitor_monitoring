@@ -8,6 +8,7 @@
   shop x product x country first. History keeps all rows.
 """
 import re
+import io
 import html
 import pandas as pd
 import streamlit as st
@@ -19,11 +20,55 @@ REQUIRED = ["PriceDate", "CountryCode", "ShopName", "SymsonProductId", "ProductN
 
 
 # ----------------------------- data layer (pure) -----------------------------
+NUMERIC_COLS = ["Price", "TotalCost", "ShippingCost", "RRP", "PriceIndex",
+                "Price_EUR", "TotalCost_EUR", "ShippingCost_EUR", "RRP_EUR"]
+
+
+def _read_csv_smart(file) -> pd.DataFrame:
+    """Read the CSV robustly to how Excel may have re-saved it:
+    - decode utf-8 / cp1252 / latin-1 (Excel often changes encoding);
+    - detect ';' vs ',' delimiter from the header; a ';' file is a European
+      Excel save, which pairs with ',' as the decimal separator."""
+    raw = file.read()
+    file.seek(0)
+    text = None
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("latin-1", errors="replace")
+    header = text.splitlines()[0] if text else ""
+    if header.count(";") > header.count(","):
+        sep, dec = ";", ","          # European Excel: semicolon-delimited, comma decimals
+    else:
+        sep, dec = ",", "."
+    return pd.read_csv(io.StringIO(text), sep=sep, decimal=dec)
+
+
+def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Safety net for price columns that still arrived as text (e.g. '2,10').
+    Only known numeric columns are touched, so shop names etc. are never altered."""
+    for c in NUMERIC_COLS:
+        if c in df.columns and not pd.api.types.is_numeric_dtype(df[c]):
+            s = df[c].astype(str).str.strip()
+            comma_decimal = s.str.contains(",", regex=False) & ~s.str.contains(r"\.", regex=True)
+            s = s.where(~comma_decimal, s.str.replace(",", ".", regex=False))
+            df[c] = pd.to_numeric(s, errors="coerce")
+    return df
+
+
 @st.cache_data(show_spinner=False)
 def load_data(file) -> pd.DataFrame:
-    df = pd.read_csv(file)
+    df = _read_csv_smart(file)
+    df = _coerce_numeric(df)
     df["PriceDate"] = pd.to_datetime(df["PriceDate"], errors="coerce")
-    df["ShopName"] = df["ShopName"].astype(str).map(html.unescape).str.strip()
+    # unescape HTML entities in shop names; robust to NaN and to the pandas-3 /
+    # pyarrow string dtype (which would otherwise feed NA into html.unescape and crash)
+    df["ShopName"] = df["ShopName"].astype(object).map(
+        lambda x: html.unescape(x).strip() if isinstance(x, str) else "")
     if "ProductName" in df:
         df["ProductName"] = df["ProductName"].fillna(df["SymsonProductId"])
     for c in ["Brand", "MainGroup", "SubGroup"]:
