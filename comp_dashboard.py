@@ -198,11 +198,13 @@ def view_article(snap, cm, value_key, value_label, dp, undercut):
     cap = "All offers, cheapest first" + (f" — {focus} only" if focus != "All countries" else "")
     st.caption(cap)
     cols = [c for c in ["CountryCode", "ShopName", cm["price"], cm["ship"], cm["total"],
-                        cm["rrp"], "Currency", "Index"] if c in d.columns]
+                        cm["rrp"], "Currency", "Index", "Url"] if c in d.columns]
     full = d.sort_values(value_col)[cols]
     if undercut is not None:
         full = full[full.Index < undercut]
-    st.dataframe(full, use_container_width=True, hide_index=True)
+    st.dataframe(full, use_container_width=True, hide_index=True,
+                 column_config={"Url": st.column_config.LinkColumn("Url", display_text="open")}
+                 if "Url" in cols else None)
 
 
 def view_competitor(snap, cm, value_key, value_label, dp):
@@ -218,9 +220,12 @@ def view_competitor(snap, cm, value_key, value_label, dp):
     c[2].metric("Median index", f"{med:.{dp}f}" if pd.notna(med) else "—")
 
     cols = [x for x in ["CountryCode", "ProductName", cm["price"], cm["total"],
-                        cm["rrp"], "Currency", "Index"] if x in d.columns]
+                        cm["rrp"], "Currency", "Index", "Url"] if x in d.columns]
+    conf = {"Index": st.column_config.NumberColumn(format=f"%.{dp}f")}
+    if "Url" in cols:
+        conf["Url"] = st.column_config.LinkColumn("Url", display_text="open")
     st.dataframe(d.sort_values("Index")[cols], use_container_width=True, hide_index=True,
-                 column_config={"Index": st.column_config.NumberColumn(format=f"%.{dp}f")})
+                 column_config=conf)
 
 
 def view_benchmark(snap, dp, undercut):
