@@ -423,9 +423,11 @@ def main():
         opts = sorted(df[col].dropna().unique())
         return s.multiselect(col, opts, default=opts if len(opts) <= 12 else [])
     brand, main, sub, ctry = ms("Brand"), ms("MainGroup"), ms("SubGroup"), ms("CountryCode")
+    platform = ms("Platform") if "Platform" in df.columns else []
 
     fdf = df.copy()
-    for col, sel in [("Brand", brand), ("MainGroup", main), ("SubGroup", sub), ("CountryCode", ctry)]:
+    for col, sel in [("Brand", brand), ("MainGroup", main), ("SubGroup", sub),
+                     ("CountryCode", ctry), ("Platform", platform)]:
         if sel:
             fdf = fdf[fdf[col].isin(sel)]
 
